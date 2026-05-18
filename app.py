@@ -899,6 +899,324 @@ def ghe_info(cargo):
     agentes = GHE_AGENTES.get(ghe, [])
     return jsonify({'ghe': ghe, 'agentes': len(agentes)})
 
+# ══════════════════════════════════════════════════════════════════════
+# LAUDO DE CALOR
+# ══════════════════════════════════════════════════════════════════════
+
+_CALOR_TPL = os.path.join(BASE_DIR, 'modelo_laudo_calor', 'template_ocupacional.docx')
+
+# Tabela NR-15 Anexo 3 Quadro 1 (M em W → IBUTG_máx em ºC) — interpolação linear
+_NR15 = [
+    (100,33.7),(102,33.6),(104,33.5),(106,33.4),(108,33.3),(110,33.2),
+    (112,33.1),(115,33.0),(117,32.9),(119,32.8),(122,32.7),(124,32.6),
+    (127,32.5),(129,32.4),(132,32.3),(135,32.2),(137,32.1),(140,32.0),
+    (143,31.9),(146,31.8),(149,31.7),(152,31.6),(155,31.5),(158,31.4),
+    (161,31.3),(165,31.2),(168,31.1),(171,31.0),(175,30.9),(178,30.8),
+    (182,30.7),(186,30.6),(189,30.5),(193,30.4),(197,30.3),(201,30.2),
+    (205,30.1),(209,30.0),(214,29.9),(218,29.8),(222,29.7),(227,29.6),
+    (231,29.5),(236,29.4),(241,29.3),(246,29.2),(251,29.1),(256,29.0),
+    (261,28.9),(266,28.8),(272,28.7),(277,28.6),(283,28.5),(289,28.4),
+    (294,28.3),(300,28.2),(306,28.1),(313,28.0),(319,27.9),(325,27.8),
+    (332,27.7),(339,27.6),(346,27.5),
+]
+
+def _nr15_limite(m):
+    if m <= _NR15[0][0]:  return _NR15[0][1]
+    if m >= _NR15[-1][0]: return _NR15[-1][1]
+    for i in range(len(_NR15)-1):
+        m1,l1 = _NR15[i]; m2,l2 = _NR15[i+1]
+        if m1 <= m <= m2:
+            return round(l1 + (l2-l1)*(m-m1)/(m2-m1), 1)
+    return _NR15[-1][1]
+
+def _xe(s):
+    return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
+
+def _fc(v, decimals=2):
+    """Format float with comma decimal separator, stripping trailing zeros."""
+    s = f'{float(v):.{decimals}f}'.rstrip('0').rstrip('.')
+    if '.' not in f'{float(v):.{decimals}f}':
+        s = s
+    else:
+        s = f'{float(v):.{decimals}f}'.rstrip('0').rstrip('.')
+    if not s or s == '-':
+        s = '0'
+    return s.replace('.', ',')
+
+def _calor_row(local, tempo, tbn, tbs, tg, ibutg, is_last):
+    """Build one measurement data row XML for the Laudo de Calor table."""
+    pid = _new_para_id
+    bot = '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    top = '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    lft = '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+    rgt = '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+
+    def bdr_side(with_bot=False):
+        return f'<w:tcBorders>{lft}{"" if not with_bot else bot}{rgt}</w:tcBorders>'
+
+    def bdr_all():
+        return f'<w:tcBorders>{top}{lft}{bot}{rgt}</w:tcBorders>'
+
+    def para(text, bold=False, center=True):
+        b = '<w:b/>' if bold else ''
+        jc = f'<w:jc w:val="center"/>' if center else ''
+        return (f'<w:p w14:paraId="{pid()}" w14:textId="77777777">'
+                f'<w:pPr><w:pStyle w:val="CORPODETEXTO"/><w:ind w:firstLine="0"/>{jc}'
+                f'<w:rPr><w:noProof w:val="0"/><w:position w:val="2"/><w:sz w:val="18"/></w:rPr></w:pPr>'
+                f'<w:r><w:rPr>{b}<w:noProof w:val="0"/><w:position w:val="2"/><w:sz w:val="18"/></w:rPr>'
+                f'<w:t xml:space="preserve">{_xe(text)}</w:t></w:r></w:p>')
+
+    def cell(w, text, bold=False, center=True, span=1, borders='', fill=''):
+        sp = f'<w:gridSpan w:val="{span}"/>' if span > 1 else ''
+        sh = f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/>' if fill else ''
+        return (f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{sp}'
+                f'{borders}{sh}<w:vAlign w:val="center"/></w:tcPr>'
+                f'{para(text, bold=bold, center=center)}</w:tc>')
+
+    tbn_s = _fc(tbn); tbs_s = _fc(tbs); tg_s = _fc(tg); ibutg_s = _fc(ibutg)
+    formula = f'IBUTG = (0,7 x {tbn_s}) + (0,3 x {tg_s})'
+
+    return (f'<w:tr w14:paraId="{pid()}" w14:textId="77777777">'
+            f'<w:trPr><w:cantSplit/></w:trPr>'
+            + cell(1985, local, bold=True, center=False,
+                   borders=bdr_side(is_last), fill='FFFFFF')
+            + cell(1062, str(tempo), center=True,
+                   borders=bdr_side(is_last), fill='FFFFFF')
+            + cell(921, tbn_s, span=3, borders=bdr_all())
+            + cell(921, tbs_s, borders=bdr_all())
+            + cell(921, tg_s, borders=bdr_all())
+            + cell(2622, formula, span=2, borders=bdr_all())
+            + cell(2623, ibutg_s, borders=bdr_all())
+            + '</w:tr>')
+
+def _calor_build_sector_block(tpl_block, setor, num):
+    """Clone template evaluation block and fill with sector data."""
+    blk = tpl_block
+
+    # ── Uniquify paraIds / textIds ─────────────────────────────────
+    blk = _uniquify_ids(blk)
+
+    # ── Sector title (CALOR2 paragraph) ───────────────────────────
+    # Replace the split runs: "Avaliação 01 -  descarga " "–" " envernizadora" " de refletores"
+    blk = re.sub(r'>Avalia[cç][aã]o 01 -\s+descarga\s*<', f'>Avaliação {num} - {_xe(setor["nome"])}<', blk)
+    blk = re.sub(r'<w:t[^>]*>–</w:t>', '<w:t></w:t>', blk)
+    blk = re.sub(r'<w:t[^>]*> envernizadora</w:t>', '<w:t></w:t>', blk)
+    blk = re.sub(r'<w:t[^>]*> de refletores</w:t>', '<w:t></w:t>', blk)
+
+    # ── Data rows: find range from first data row to end of last ──
+    # First data row starts at <w:tr containing "Forno"
+    forno_pos = blk.find('>Forno<')
+    row1_start = blk.rfind('<w:tr ', 0, forno_pos)
+    # Last data row ends at </w:tr> after "Bancada de preparo"
+    bancada_pos = blk.find('>Bancada de preparo<')
+    row2_end = blk.find('</w:tr>', bancada_pos) + len('</w:tr>')
+
+    # Build N data rows from sector points
+    pontos = setor['pontos']
+    n = len(pontos)
+    data_rows = ''
+    for idx, p in enumerate(pontos):
+        tbn = float(p['tbn']); tg = float(p['tg'])
+        ibutg = round(0.7 * tbn + 0.3 * tg, 2)
+        data_rows += _calor_row(
+            p['local'], p['tempo'], tbn, float(p['tbs']), tg, ibutg,
+            is_last=(idx == n - 1)
+        )
+
+    blk = blk[:row1_start] + data_rows + blk[row2_end:]
+
+    # ── Recalculate weighted averages ─────────────────────────────
+    pontos = setor['pontos']
+    total_t = sum(float(p['tempo']) for p in pontos)
+    ibutg_medio = sum((0.7*float(p['tbn'])+0.3*float(p['tg']))*float(p['tempo']) for p in pontos) / total_t
+    m_medio = sum(float(p['M'])*float(p['tempo']) for p in pontos) / total_t
+    ibutg_lim = _nr15_limite(m_medio)
+
+    im_s = _fc(ibutg_medio, 1)  # e.g. "21,7"
+    mm_s = str(round(m_medio))  # e.g. "198"
+    lim_s = _fc(ibutg_lim, 1)  # e.g. "30,2"
+
+    # IBUTG médio (the row has: "IBUTG (Médio) = " as trailing text in last para of that cell)
+    blk = blk.replace('>IBUTG (Médio) = <', f'>IBUTG (Médio) = {_xe(im_s)} ºC<')
+
+    # M média
+    blk = blk.replace('>M (média) =<', f'>M (média) = {_xe(mm_s)} W<')
+
+    # Activity descriptions (both occurrences)
+    atividades = list(dict.fromkeys(p.get('atividade','') for p in pontos))
+    ativ1 = atividades[0] if atividades else 'Trabalho Moderado'
+    ativ2 = atividades[1] if len(atividades) > 1 else ativ1
+    m1 = str(round(float(pontos[0]['M'])))
+    m2 = str(round(float(pontos[-1]['M'])))
+
+    blk = blk.replace('> De pé – Trabalho leve com os dois bra\xe7os<',
+                       f'> {_xe(ativ1)}<', 1)
+    blk = blk.replace('> De pé – Trabalho leve com os dois bra\xe7os<',
+                       f'> {_xe(ativ2)}<', 1)
+    # M values (x _ W pattern)
+    blk = blk.replace('>x <', f'>x {_xe(m1)} <', 1)
+    blk = blk.replace('>x<', f'>x {_xe(m2)}<', 1)
+
+    # Horário
+    blk = blk.replace('>14:00<', f'>{_xe(setor.get("horario",""))}<')
+
+    # Vestimenta
+    blk = blk.replace('>Uniforme de Trabalho (0)<',
+                       f'>{_xe(setor.get("vestimenta","Uniforme de Trabalho (0)"))}<')
+
+    # Conclusão
+    aceitavel = ibutg_medio <= ibutg_lim
+    status_txt = 'não ultrapassando' if aceitavel else 'ultrapassando'
+    conclusao = (
+        f'O limite de tolerância para exposição ao calor, segundo o Quadro Nº 1, '
+        f'do Anexo Nº 3, na NR-09, para uma taxa de metabolismo média de '
+        f'{_xe(mm_s)} W é de {_xe(lim_s)} IBUTG. '
+        f'O IBUTG médio encontrado foi de {_xe(im_s)} ºC, '
+        f'{status_txt} o limite de tolerância.'
+    )
+    blk = re.sub(
+        r'O limite de toler\xe2ncia para exposi\xe7\xe3o ao calor.*?IBUTG\.',
+        conclusao,
+        blk, flags=re.DOTALL
+    )
+    # Remove the second conclusão sentence (now merged into the first)
+    blk = re.sub(
+        r'O IBUTG encontrado na medi\xe7\xe3o n\xe3o ultrapassou.*?toler\xe2ncia\.',
+        '',
+        blk, flags=re.DOTALL
+    )
+
+    return blk
+
+def gerar_laudo_calor_bytes(empresa, avaliacao, setores):
+    """Generate Laudo de Calor DOCX bytes from template."""
+    with zipfile.ZipFile(_CALOR_TPL, 'r') as ztpl:
+        xml = ztpl.read('word/document.xml').decode('utf-8')
+
+        # ── Simple company replacements ────────────────────────────
+        nome = empresa.get('razaoSocial','')
+        xml = xml.replace('>HD Indústria De Alimentos Ltda<', f'>{_xe(nome)}<')
+        # Cover page: "XXXXXXXXXXXXXX" + " LTDA" split across 2 runs
+        xml = xml.replace('>XXXXXXXXXXXXXX<', f'>{_xe(nome.upper())}<')
+        xml = re.sub(r'> LTDA<', '><', xml, count=1)
+        xml = xml.replace('>NOME DA EMPRESA<', f'>{_xe(nome)}<')
+        xml = xml.replace('>Rua Itapema, Nº. 326<', f'>{_xe(empresa.get("endereco",""))}<')
+        xml = xml.replace('>44.888.946/0001-01<', f'>{_xe(empresa.get("cnpj",""))}<')
+        xml = xml.replace('>30310-490<', f'>{_xe(empresa.get("cep",""))}<')
+        xml = xml.replace('>Anchieta<', f'>{_xe(empresa.get("bairro",""))}<')
+        xml = xml.replace('>10.91-1<', f'>{_xe(empresa.get("cnae",""))}<')
+        xml = xml.replace('>Fabricação de produtos de panificação.<',
+                          f'>{_xe(empresa.get("descricaoCnae",""))}<')
+        xml = xml.replace('>Pedro<', f'>{_xe(empresa.get("contato",""))}<')
+        xml = xml.replace('>(31) 3287-7022<', f'>{_xe(empresa.get("telefone",""))}<')
+        xml = xml.replace('>administrativo199@paoecia.com.br<',
+                          f'>{_xe(empresa.get("email",""))}<')
+        xml = xml.replace('>Grau de Risco<', '>Grau de Risco<')  # label, skip
+        # Grau de risco value "3" is in a cell labeled "Grau de Risco" — replace nearby
+        xml = re.sub(
+            r'(Grau de Risco</w:t>.*?<w:t[^>]*>)3(</w:t>)',
+            lambda m: m.group(1) + _xe(str(empresa.get('grauRisco','3'))) + m.group(2),
+            xml, flags=re.DOTALL, count=1
+        )
+        # City (only first occurrence — in the company table)
+        xml = xml.replace('>Belo Horizonte<', f'>{_xe(empresa.get("cidade",""))}<', 1)
+        # UF (first occurrence — company table)
+        xml = re.sub(r'(?<=<w:t>)MG(?=</w:t>)', _xe(empresa.get('uf','MG')), xml, count=1)
+
+        # ── Carta date: "CONTAGEM, " "JULHO " "DE 20" "22" "."  ──
+        # Replace first run with full string, clear the rest
+        cidade_carta = avaliacao.get('cidadeCarta','BELO HORIZONTE, MAIO DE 2026.')
+        if not cidade_carta.endswith('.'):
+            cidade_carta += '.'
+        xml = re.sub(r'>CONTAGEM, </w:t>',
+                     f'>{_xe(cidade_carta)}</w:t>', xml, count=1)
+        xml = re.sub(r'<w:t[^>]*>JULHO </w:t>', '<w:t></w:t>', xml, count=1)
+        xml = re.sub(r'<w:t[^>]*>DE 20</w:t>', '<w:t></w:t>', xml, count=1)
+        xml = re.sub(r'<w:t[^>]*>22</w:t>', '<w:t></w:t>', xml, count=1)
+        xml = re.sub(r'<w:t[^>]*>\.</w:t>', '<w:t></w:t>', xml, count=1)
+
+        # ── Equipment / calibration ────────────────────────────────
+        equip = avaliacao.get('equipamento',
+                'Net.Temp – Chrompack Smart TEMP | S/N: IBU0000000209')
+        cert  = avaliacao.get('certNo','180.646')
+        dcal  = avaliacao.get('dataCalib','24/03/2026')
+        equip_txt = f'{equip} — Certificado Nº {cert} | Calibrado em {dcal}'
+        # Template has: "Termômetro de Globo " "Pro" "temp" " " "4" " – " "Griffer" "."
+        xml = re.sub(
+            r'>Termômetro de Globo </w:t>.*?>\.</w:t>',
+            f'>{_xe(equip_txt)}</w:t>',
+            xml, flags=re.DOTALL, count=1
+        )
+
+        # ── Responsável pela coleta ───────────────────────────────
+        xml = xml.replace('>nome<', '>WESLEY VIEIRA RODRIGUES<')
+        xml = xml.replace('>xxx<', '>0079720<')
+
+        # ── Sector evaluation blocks ──────────────────────────────
+        # Extract template block: from CALOR2 paragraph to end of FOTO table
+        calor2_pos = xml.find('w:val="CALOR2"')
+        tpl_block_start = xml.rfind('<w:p ', 0, calor2_pos)
+        foto_pos = xml.rfind('>FOTO<')
+        tpl_block_end = xml.find('</w:tbl>', foto_pos) + len('</w:tbl>')
+        tpl_block = xml[tpl_block_start:tpl_block_end]
+
+        # Build all sector blocks
+        page_break = ('<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+                      '<w:r><w:br w:type="page"/></w:r></w:p>')
+        sector_xml = ''
+        for i, setor in enumerate(setores):
+            if i > 0:
+                sector_xml += page_break
+            sector_xml += _calor_build_sector_block(tpl_block, setor, i + 1)
+
+        # Replace template block with all sector blocks
+        xml = xml[:tpl_block_start] + sector_xml + xml[tpl_block_end:]
+
+        # ── Repack DOCX ───────────────────────────────────────────
+        buf = io.BytesIO()
+        added = set()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in ztpl.namelist():
+                if item == 'word/document.xml':
+                    zout.writestr(item, xml.encode('utf-8'))
+                else:
+                    zout.writestr(item, ztpl.read(item))
+                added.add(item)
+        buf.seek(0)
+        return buf.getvalue()
+
+
+@app.route('/gerar_calor', methods=['POST'])
+def gerar_calor():
+    data = request.json or {}
+    empresa = data.get('empresa', {})
+    avaliacao = data.get('avaliacao', {})
+    setores = data.get('setores', [])
+
+    if not empresa.get('razaoSocial','').strip():
+        return jsonify({'erro': 'Informe a Razão Social'}), 400
+    if not setores:
+        return jsonify({'erro': 'Adicione pelo menos um setor'}), 400
+    for s in setores:
+        if not s.get('pontos'):
+            return jsonify({'erro': f'Setor "{s.get("nome","")}" sem pontos de medição'}), 400
+
+    try:
+        docx_bytes = gerar_laudo_calor_bytes(empresa, avaliacao, setores)
+        nome = empresa.get('razaoSocial','Empresa')
+        nome_safe = re.sub(r'[/\\:*?"<>|]','_', nome)
+        filename = f"Laudo de Calor - {nome_safe} - {mes_ano().replace(' / ','_')}.docx"
+        return send_file(
+            io.BytesIO(docx_bytes),
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'erro': f'Erro interno: {str(e)}'}), 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
